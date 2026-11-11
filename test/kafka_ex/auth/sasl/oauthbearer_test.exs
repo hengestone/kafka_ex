@@ -85,6 +85,66 @@ defmodule KafkaEx.Auth.SASL.OAuthBearerTest do
       assert String.contains?(message, "\x01tenantId=tenant1")
     end
 
+    test "succeeds when the broker answers with an empty server message" do
+      config =
+        Config.new(%{
+          mechanism: :oauthbearer,
+          mechanism_opts: %{token_provider: fn -> {:ok, "test-token"} end}
+        })
+
+      send_fun = fn msg ->
+        send(self(), {:auth_message, msg})
+        {:ok, ""}
+      end
+
+      assert :ok = OAuthBearer.authenticate(config, send_fun)
+      assert_receive {:auth_message, _initial_response}
+      refute_receive {:auth_message, _}
+    end
+
+    test "acknowledges an RFC 7628 error challenge and returns token_rejected" do
+      challenge = ~s({"status":"invalid_token"})
+
+      config =
+        Config.new(%{
+          mechanism: :oauthbearer,
+          mechanism_opts: %{token_provider: fn -> {:ok, "test-token"} end}
+        })
+
+      send_fun = fn msg ->
+        send(self(), {:auth_message, msg})
+
+        case msg do
+          <<0x01>> -> {:error, {:auth_failed, :sasl_authentication_failed}}
+          _initial_response -> {:ok, challenge}
+        end
+      end
+
+      assert {:error, {:auth_failed, :token_rejected, ^challenge}} =
+               OAuthBearer.authenticate(config, send_fun)
+
+      assert_receive {:auth_message, "n,,\x01auth=Bearer test-token\x01\x01"}
+      assert_receive {:auth_message, <<0x01>>}
+    end
+
+    test "returns token_rejected when the broker accepts the error challenge acknowledgement" do
+      challenge = ~s({"status":"invalid_token"})
+
+      config =
+        Config.new(%{
+          mechanism: :oauthbearer,
+          mechanism_opts: %{token_provider: fn -> {:ok, "test-token"} end}
+        })
+
+      send_fun = fn
+        <<0x01>> -> {:ok, nil}
+        _initial_response -> {:ok, challenge}
+      end
+
+      assert {:error, {:auth_failed, :token_rejected, ^challenge}} =
+               OAuthBearer.authenticate(config, send_fun)
+    end
+
     test "returns error when send_fun fails" do
       config =
         Config.new(%{

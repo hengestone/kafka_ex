@@ -19,6 +19,14 @@
   `ConsumerGroup.start_link/4` return `{:error, {:invalid_option, :invalid_max_records}}`. The
   `[:kafka_ex, :consumer, :process]` span's `message_count` is the chunk size.
 
+### Fixed
+
+* **OAUTHBEARER treated a rejected token as success.** A broker rejects an invalid token with an
+  RFC 7628 error challenge in a response without an error code, and `KafkaEx.Auth.SASL.OAuthBearer`
+  took that response for success. The connection then failed on its first request instead of at
+  authentication. The mechanism now acknowledges the challenge with `%x01`, as RFC 7628 section
+  3.2.2 requires, and returns `{:error, {:auth_failed, :token_rejected, challenge}}`.
+
 ## 1.2.0 (2026-11-07)
 
 > Requires Kayrock 1.1.0 (`{:kayrock, "~> 1.1"}`). Upgrade KafkaEx in the same
@@ -835,7 +843,7 @@ KafkaEx 0.11.0 is a large improvement to KafkaEx that sees the introduction of t
 *   Any GenServer can be used as a KafkaEx.GenConsumer (#339)
 *   Can specify wait time before attempting reconnect (#347)
 *   KafkaEx.stream/3 now uses the KafkaEx.Server interface, which inherits the sync_timeout setting. This avoids timeouts when sync_timeout needs to be greater than default. (#354)
-*   KafkaEx can now use [Kayrock](https://github.com/dantswain/kayrock) as the client implementation. This is a large change, and is pushing toward the improvements we want in 1.0 to allow the library to easily support new versions of the Kafka protocol. (#356, #359, #364, #366, #367, #369, #370, #374, #375, #377, #379, #387,  #406, #408) 
+*   KafkaEx can now use [Kayrock](https://github.com/dantswain/kayrock) as the client implementation. This is a large change, and is pushing toward the improvements we want in 1.0 to allow the library to easily support new versions of the Kafka protocol. (#356, #359, #364, #366, #367, #369, #370, #374, #375, #377, #379, #387,  #406, #408)
 *   `KafkaEx.Protocol.Fetch.Message` includes the topic and partition, allowing consumers to know which topic and partition they consumed from.
 *   Add `KafkaEx.start_link_worker/1-2` to start a working and link it to the current process.
 *   Allow setting the client_id for the application - supports better monitoring, debugging, and quotas. (#388)
@@ -856,7 +864,7 @@ Improvements over default client:
 ### Misc
 
 *   Test suite uses KafkaEx 0.11 now in preparation for fully supporting Kafka API versions.
-*   KafkaEx.Protocol.Produce cleaned up (#380) 
+*   KafkaEx.Protocol.Produce cleaned up (#380)
 *   Documentation improvements (#383, #384)
 *   Test against Elixir 1.9 (#394)
 *   Use OTP 22.3.3+ for OTP 22.2 testing to avoid SSL bug. (#405)
@@ -864,8 +872,8 @@ Improvements over default client:
 ## 0.10.0
 
 ### Features
-*   Allow passing in state to a `KafkaEx.GenConsumer` by defining a `KafkaEx.GenConsumer.init/3` callback. Adds a default implementation of `init/3` to ensure backward compatibility. -- @mtrudel 
-*   Support DeleteTopics API for Kafka 0.10+ -- @jbruggem 
+*   Allow passing in state to a `KafkaEx.GenConsumer` by defining a `KafkaEx.GenConsumer.init/3` callback. Adds a default implementation of `init/3` to ensure backward compatibility. -- @mtrudel
+*   Support DeleteTopics API for Kafka 0.10+ -- @jbruggem
 *   Add a default partitioner using murmur2 hashing when key is provided, or random partitioning otherwise. Use the `KafkaEx.Partitioner` behaviour to define a different partitioner, and enable it by adding it to the `partitioner` configuration setting.
 
 ### Misc

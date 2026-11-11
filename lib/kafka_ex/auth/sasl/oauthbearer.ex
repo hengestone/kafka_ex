@@ -20,11 +20,22 @@ defmodule KafkaEx.Auth.SASL.OAuthBearer do
 
   The provider is called on each new connection and is responsible for
   caching and refreshing tokens.
+
+  ## Rejected Tokens
+
+  A broker that rejects the token answers with an RFC 7628 error challenge, a
+  JSON message such as `{"status":"invalid_token"}`, in a response without an
+  error code. The client acknowledges it with `%x01` and the broker then fails
+  the exchange. `authenticate/2` returns
+  `{:error, {:auth_failed, :token_rejected, challenge}}` in that case, so the
+  caller can drop the token and fetch a new one.
   """
 
   @behaviour KafkaEx.Auth.Mechanism
 
   alias KafkaEx.Auth.Config
+
+  @kvsep <<0x01>>
 
   @impl true
   def mechanism_name(_config), do: "OAUTHBEARER"
@@ -33,10 +44,18 @@ defmodule KafkaEx.Auth.SASL.OAuthBearer do
   def authenticate(%Config{mechanism_opts: opts}, send_fun) do
     with {:ok, token} <- fetch_token(opts) do
       case send_fun.(build_initial_response(token, opts)) do
-        {:ok, _} -> :ok
+        {:ok, challenge} when challenge in [nil, ""] -> :ok
+        {:ok, challenge} -> reject_error_challenge(send_fun, challenge)
         {:error, _} = err -> err
       end
     end
+  end
+
+  # RFC 7628 3.2.2: the broker fails the exchange after the %x01 acknowledgement, so its reply
+  # carries no more information than the challenge.
+  defp reject_error_challenge(send_fun, challenge) do
+    _ = send_fun.(@kvsep)
+    {:error, {:auth_failed, :token_rejected, challenge}}
   end
 
   defp fetch_token(%{token_provider: provider}) when is_function(provider, 0) do
