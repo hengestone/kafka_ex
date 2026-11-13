@@ -461,6 +461,31 @@ defmodule KafkaEx.TelemetryTest do
       :telemetry.detach(ref)
     end
 
+    test "adds result: :ok to stop metadata for a bare :ok result" do
+      ref = make_ref()
+      test_pid = self()
+
+      handler = fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry_event, ref, event, measurements, metadata})
+      end
+
+      :telemetry.attach(ref, [:kafka_ex, :test, :stop], handler, nil)
+
+      result =
+        Telemetry.span([:kafka_ex, :test], %{foo: "bar"}, fn ->
+          {:ok, %{extra: "data"}}
+        end)
+
+      assert result == :ok
+
+      assert_receive {:telemetry_event, ^ref, [:kafka_ex, :test, :stop], _stop_measurements, stop_metadata}
+      assert stop_metadata.result == :ok
+      assert stop_metadata.extra == "data"
+      refute Map.has_key?(stop_metadata, :error)
+
+      :telemetry.detach(ref)
+    end
+
     test "emits exception event on error" do
       ref = make_ref()
       test_pid = self()
