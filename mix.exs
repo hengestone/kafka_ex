@@ -18,15 +18,6 @@ defmodule KafkaEx.Mixfile do
         flags: [:error_handling]
       ],
       test_coverage: [tool: ExCoveralls],
-      preferred_cli_env: [
-        coveralls: :test,
-        "coveralls.detail": :test,
-        "coveralls.html": :test,
-        "test.unit": :test,
-        "test.integration": :test,
-        "test.chaos": :test,
-        "test.kafka4": :test
-      ],
       description: description(),
       package: package(),
       deps: deps(),
@@ -45,6 +36,23 @@ defmodule KafkaEx.Mixfile do
         source_ref: "v#{@version}"
       ]
     ]
+  end
+
+  def cli do
+    envs = [
+      coveralls: :test,
+      "coveralls.detail": :test,
+      "coveralls.html": :test,
+      "test.unit": :test,
+      "test.integration": :test,
+      "test.chaos": :test,
+      "test.kafka4": :test
+    ]
+
+    # Elixir 1.14 only knows :preferred_cli_env; 1.15+ renamed it.
+    if Version.match?(System.version(), ">= 1.15.0"),
+      do: [preferred_envs: envs],
+      else: [preferred_cli_env: envs]
   end
 
   def application do

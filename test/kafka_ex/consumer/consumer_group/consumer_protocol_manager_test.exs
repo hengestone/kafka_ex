@@ -648,6 +648,40 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManagerTest do
       assert ConsumerGroup.assignments(sup) == [{"a", 1}, {"a", 2}, {"a", 3}]
     end
 
+    test "logs the partitions revoked, assigned and owned by a reconcile" do
+      %{manager: manager} = start_group()
+
+      join_log =
+        capture_log(fn ->
+          {_member_id, _pids} = join_with([0, 1])
+          Process.sleep(50)
+        end)
+
+      assert join_log =~ "reconciled epoch"
+      assert join_log =~ "0 revoked, 2 assigned, 2 owned"
+      assert join_log =~ "assigned: [a:0, a:1]"
+      assert join_log =~ "owned: [a:0, a:1]"
+
+      log =
+        capture_log(fn ->
+          {from, hb} = poke(manager)
+          reply_ok(from, hb, 2, assignment([{@id_a, "a", [1, 2]}]))
+
+          {from, revoke_ack} = next_heartbeat()
+          reply_ok(from, revoke_ack, 2)
+          assert_receive {:started, _, {"a", 2}, _}
+
+          {from, ack} = next_heartbeat()
+          reply_ok(from, ack, 2)
+          Process.sleep(50)
+        end)
+
+      assert log =~ "1 revoked, 1 assigned, 2 owned"
+      assert log =~ "revoked: [a:0]"
+      assert log =~ "assigned: [a:2]"
+      assert log =~ "owned: [a:1, a:2]"
+    end
+
     test "an epoch bump without an assignment change only pushes the epoch" do
       %{manager: manager} = start_group()
       {_member_id, %{0 => pid}} = join_with([0])
