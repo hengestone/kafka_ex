@@ -205,8 +205,10 @@ defmodule KafkaEx.Consumer.GenConsumer do
   `ConsumerGroup.validateOffsetFetch` / `validateOffsetCommit`):
 
     * Startup OffsetFetch rejected with `:stale_member_epoch` (OffsetFetch
-      needs the member's exact current epoch): the consumer stays up without
-      an offset and retries with an exponential backoff from
+      needs the member's exact current epoch): the consumer asks its
+      `:group_manager_pid` for the current epoch and retries at once. If the
+      manager does not answer in time or holds the same epoch, the consumer
+      stays up without an offset and retries with an exponential backoff from
       `:load_offsets_retry_backoff_ms` (at least 100 ms, capped at 30 s, one warning), or at
       once when `update_membership/3` delivers the current epoch.
     * Startup OffsetFetch rejected with `:unknown_member_id` or
@@ -1720,28 +1722,7 @@ defmodule KafkaEx.Consumer.GenConsumer do
          }, 0}
 
       {:membership_rejected, :stale_member_epoch, %State{} = state} ->
-        # The epoch this consumer was given is not the member's current one
-        # (OffsetFetch needs an exact match), e.g. it moved on between the
-        # owner starting the consumer and this fetch. The owner delivers the
-        # current one with update_membership/3, which retries at once; until
-        # then retry with an exponential backoff (capped).
-        count = state.load_offsets_stale_count + 1
-        delay = stale_epoch_backoff_ms(count)
-
-        Logger.log(
-          if(count == 1, do: :warning, else: :debug),
-          "Committed offset fetch for #{state.topic}/#{state.partition} rejected with :stale_member_epoch " <>
-            "(member_epoch=#{state.member_epoch}, attempt #{count}); waiting for a membership update, " <>
-            "retrying in #{delay} ms"
-        )
-
-        state = %State{
-          state
-          | load_offsets_stale_count: count,
-            load_offsets_retry_at: :erlang.monotonic_time(:milli_seconds) + delay
-        }
-
-        {:noreply, state, delay}
+        retry_stale_offset_fetch(state, refreshed_member_epoch(state))
 
       {:membership_rejected, reason, %State{} = state} ->
         # The group no longer knows this member (session expired) or fenced
@@ -1758,6 +1739,56 @@ defmodule KafkaEx.Consumer.GenConsumer do
         {:stop, {:shutdown, {:rejoin_required, reason}}, state}
     end
   end
+
+  # OffsetFetch needs the member's exact epoch, which may have moved on since the owner started
+  # this consumer. A pulled epoch retries at once; otherwise wait for the push or the backoff.
+  defp retry_stale_offset_fetch(%State{} = state, {:ok, member_epoch}) do
+    count = state.load_offsets_stale_count + 1
+
+    Logger.log(
+      stale_log_level(count),
+      "Committed offset fetch for #{state.topic}/#{state.partition} rejected with :stale_member_epoch " <>
+        "(member_epoch=#{state.member_epoch}, attempt #{count}); retrying at once with " <>
+        "member_epoch=#{member_epoch}"
+    )
+
+    {:noreply, %State{state | member_epoch: member_epoch, load_offsets_stale_count: count, load_offsets_retry_at: nil},
+     0}
+  end
+
+  defp retry_stale_offset_fetch(%State{} = state, :error) do
+    count = state.load_offsets_stale_count + 1
+    delay = stale_epoch_backoff_ms(count)
+
+    Logger.log(
+      stale_log_level(count),
+      "Committed offset fetch for #{state.topic}/#{state.partition} rejected with :stale_member_epoch " <>
+        "(member_epoch=#{state.member_epoch}, attempt #{count}); waiting for a membership update, " <>
+        "retrying in #{delay} ms"
+    )
+
+    state = %State{
+      state
+      | load_offsets_stale_count: count,
+        load_offsets_retry_at: :erlang.monotonic_time(:milli_seconds) + delay
+    }
+
+    {:noreply, state, delay}
+  end
+
+  defp stale_log_level(1), do: :warning
+  defp stale_log_level(_count), do: :debug
+
+  @member_epoch_pull_timeout_ms 500
+
+  defp refreshed_member_epoch(%State{group_manager_pid: manager, member_epoch: held}) when is_pid(manager) do
+    epoch = GenServer.call(manager, :member_epoch, @member_epoch_pull_timeout_ms)
+    if epoch != held and valid_member_epoch?(epoch), do: {:ok, epoch}, else: :error
+  catch
+    :exit, _ -> :error
+  end
+
+  defp refreshed_member_epoch(_state), do: :error
 
   defp load_offsets_retry_remaining(%State{load_offsets_retry_at: nil}), do: 0
 

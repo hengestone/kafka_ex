@@ -657,7 +657,8 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManagerTest do
           Process.sleep(50)
         end)
 
-      assert join_log =~ "reconciled epoch"
+      assert join_log =~ "2 added [a:0, a:1], 0 removed [], 2 in target"
+      assert join_log =~ ~r/reconciled epoch 1: 0 revoked, 2 assigned, 2 owned, took \d+ ms, \d+ ms after the target/
       assert join_log =~ "0 revoked, 2 assigned, 2 owned"
       assert join_log =~ "assigned: [a:0, a:1]"
       assert join_log =~ "owned: [a:0, a:1]"
@@ -676,6 +677,7 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManagerTest do
           Process.sleep(50)
         end)
 
+      assert log =~ "1 added [a:2], 1 removed [a:0], 2 in target"
       assert log =~ "1 revoked, 1 assigned, 2 owned"
       assert log =~ "revoked: [a:0]"
       assert log =~ "assigned: [a:2]"

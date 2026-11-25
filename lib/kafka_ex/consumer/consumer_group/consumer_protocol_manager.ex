@@ -259,6 +259,8 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
       :heartbeat_timer,
       :heartbeat_interval_ms,
       :target,
+      # Monotonic time the current target was received.
+      :target_at,
       # The revoke / assign / lose in flight (one at a time).
       :op,
       # The epoch push in flight. Separate from :op: it queues behind fetch
@@ -848,7 +850,28 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
           into: MapSet.new(),
           do: {id, partition}
 
-    %State{state | target: target, topic_names: Map.merge(state.topic_names, names), resolve_failures: 0}
+    topic_names = Map.merge(state.topic_names, names)
+    log_target(state, topic_names, target)
+
+    %State{state | target: target, target_at: System.monotonic_time(), topic_names: topic_names, resolve_failures: 0}
+  end
+
+  defp log_target(%State{} = state, topic_names, target) do
+    previous = state.target || MapSet.new()
+    added = target |> MapSet.difference(previous) |> target_partitions(topic_names)
+    removed = previous |> MapSet.difference(target) |> target_partitions(topic_names)
+
+    if added != [] or removed != [] do
+      Logger.info(
+        "Member #{state.member_id} of #{state.group_name} received a target at epoch #{state.member_epoch}: " <>
+          "#{length(added)} added [#{format_partitions(added)}], " <>
+          "#{length(removed)} removed [#{format_partitions(removed)}], #{MapSet.size(target)} in target"
+      )
+    end
+  end
+
+  defp target_partitions(keys, topic_names) do
+    Enum.map(keys, fn {topic_id, partition} -> {Map.get(topic_names, topic_id, "unresolved"), partition} end)
   end
 
   defp heartbeat_error(%State{} = state, reason) do
@@ -1138,11 +1161,14 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
     if state.reconcile do
       %{started_at: started_at, revoked: revoked, assigned: assigned} = state.reconcile
       duration = System.monotonic_time() - started_at
+      took_ms = System.convert_time_unit(duration, :native, :millisecond)
+      since_target_ms = since_target_ms(state)
       owned_partitions = Enum.map(owned, &topic_partition(state, &1))
 
       Logger.info(
         "Member #{state.member_id} of #{state.group_name} reconciled epoch #{state.member_epoch}: " <>
-          "#{revoked} revoked, #{assigned} assigned, #{MapSet.size(owned)} owned " <>
+          "#{revoked} revoked, #{assigned} assigned, #{MapSet.size(owned)} owned, " <>
+          "took #{took_ms} ms, #{since_target_ms} ms after the target " <>
           "(revoked: [#{format_partitions(state.reconcile.revoked_partitions)}], " <>
           "assigned: [#{format_partitions(state.reconcile.assigned_partitions)}], " <>
           "owned: [#{format_partitions(owned_partitions)}])"
@@ -1321,6 +1347,11 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
         assigned_partitions: reconcile.assigned_partitions ++ partitions
     }
   end
+
+  defp since_target_ms(%State{target_at: nil}), do: 0
+
+  defp since_target_ms(%State{target_at: target_at}),
+    do: System.convert_time_unit(System.monotonic_time() - target_at, :native, :millisecond)
 
   defp format_partitions(partitions) do
     partitions |> Enum.sort() |> Enum.map_join(", ", fn {topic, partition} -> "#{topic}:#{partition}" end)
