@@ -19,6 +19,13 @@
   `ConsumerGroup.start_link/4` return `{:error, {:invalid_option, :invalid_max_records}}`. The
   `[:kafka_ex, :consumer, :process]` span's `message_count` is the chunk size.
 
+### Changed
+
+* **The KIP-848 reconcile log names the partitions.** `reconciled epoch N: x revoked, y assigned,
+  z owned` now ends with `(revoked: [topic:partition, ...], assigned: [...], owned: [...])`, so a
+  gap in a partition's consumption can be traced to the member that held or received it. The
+  counts and the telemetry event are unchanged.
+
 ### Fixed
 
 * **OAUTHBEARER treated a rejected token as success.** A broker rejects an invalid token with an

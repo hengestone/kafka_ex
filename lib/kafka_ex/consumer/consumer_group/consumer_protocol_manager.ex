@@ -1086,7 +1086,16 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
   end
 
   defp begin_reconcile(%State{reconcile: nil} = state),
-    do: %State{state | reconcile: %{started_at: System.monotonic_time(), revoked: 0, assigned: 0}}
+    do: %State{
+      state
+      | reconcile: %{
+          started_at: System.monotonic_time(),
+          revoked: 0,
+          assigned: 0,
+          revoked_partitions: [],
+          assigned_partitions: []
+        }
+    }
 
   defp begin_reconcile(state), do: state
 
@@ -1129,10 +1138,14 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
     if state.reconcile do
       %{started_at: started_at, revoked: revoked, assigned: assigned} = state.reconcile
       duration = System.monotonic_time() - started_at
+      owned_partitions = Enum.map(owned, &topic_partition(state, &1))
 
       Logger.info(
         "Member #{state.member_id} of #{state.group_name} reconciled epoch #{state.member_epoch}: " <>
-          "#{revoked} revoked, #{assigned} assigned, #{MapSet.size(owned)} owned"
+          "#{revoked} revoked, #{assigned} assigned, #{MapSet.size(owned)} owned " <>
+          "(revoked: [#{format_partitions(state.reconcile.revoked_partitions)}], " <>
+          "assigned: [#{format_partitions(state.reconcile.assigned_partitions)}], " <>
+          "owned: [#{format_partitions(owned_partitions)}])"
       )
 
       Telemetry.emit_reconcile(state.group_name, state.member_id, state.member_epoch, %{
@@ -1279,7 +1292,13 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
     {running, inactive} = Enum.split_with(keys, &(state.owned[&1].status == :running))
     # Not running (restarting or stopped): nothing to stop. A pending restart
     # timer for one of them finds no entry (or a newer token) and is ignored.
-    state = %State{state | owned: Map.drop(state.owned, inactive), reconcile: count(state.reconcile, :revoked, keys)}
+    revoked_partitions = Enum.map(keys, &topic_partition(state, &1))
+
+    state = %State{
+      state
+      | owned: Map.drop(state.owned, inactive),
+        reconcile: track(state.reconcile, :revoked, revoked_partitions)
+    }
 
     case running do
       [] -> revoked(state, inactive)
@@ -1287,7 +1306,25 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
     end
   end
 
-  defp count(reconcile, key, keys), do: Map.update!(reconcile, key, &(&1 + length(keys)))
+  defp track(reconcile, :revoked, partitions) do
+    %{
+      reconcile
+      | revoked: reconcile.revoked + length(partitions),
+        revoked_partitions: reconcile.revoked_partitions ++ partitions
+    }
+  end
+
+  defp track(reconcile, :assigned, partitions) do
+    %{
+      reconcile
+      | assigned: reconcile.assigned + length(partitions),
+        assigned_partitions: reconcile.assigned_partitions ++ partitions
+    }
+  end
+
+  defp format_partitions(partitions) do
+    partitions |> Enum.sort() |> Enum.map_join(", ", fn {topic, partition} -> "#{topic}:#{partition}" end)
+  end
 
   # Stops consumers concurrently (GenConsumer.Supervisor.stop_partitions/3) in
   # a monitored process; its exit reason carries the result.
@@ -1472,7 +1509,8 @@ defmodule KafkaEx.Consumer.ConsumerGroup.ConsumerProtocolManager do
   # Every start was already applied as it returned (the {@async_started, ...}
   # messages arrive before the worker's result).
   defp op_done(%State{} = state, %{kind: :assign} = op, {:op_result, _}) do
-    step(%State{state | reconcile: state.reconcile && count(state.reconcile, :assigned, op.keys)})
+    assigned_partitions = Enum.map(op.keys, &{Map.fetch!(op.names, &1), elem(&1, 1)})
+    step(%State{state | reconcile: state.reconcile && track(state.reconcile, :assigned, assigned_partitions)})
   end
 
   # The operation process itself died (it should not). Re-read what is
