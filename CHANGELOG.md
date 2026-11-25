@@ -24,10 +24,18 @@
 * **The KIP-848 reconcile log names the partitions.** `reconciled epoch N: x revoked, y assigned,
   z owned` now ends with `(revoked: [topic:partition, ...], assigned: [...], owned: [...])`, so a
   gap in a partition's consumption can be traced to the member that held or received it. The
-  counts and the telemetry event are unchanged.
+  counts and the telemetry event are unchanged. The line also gives `took X ms, Y ms after the
+  target`, and a new line `received a target at epoch N: a added [...], b removed [...]` marks when
+  a member receives a target.
 
 ### Fixed
 
+* **A KIP-848 consumer no longer waits for the owner's push after a stale startup OffsetFetch.**
+  When the broker rejected the first committed-offset fetch with `:stale_member_epoch`, the
+  consumer waited for `update_membership/3`, which the owner sends only after its whole assign
+  operation ends, or for a backoff of up to 30 s. The consumer now asks its `:group_manager_pid`
+  for the member's current epoch (`GenServer.call(pid, :member_epoch, 500)`) and retries at once.
+  If the manager does not answer in time or holds the same epoch, the consumer waits as before.
 * **OAUTHBEARER treated a rejected token as success.** A broker rejects an invalid token with an
   RFC 7628 error challenge in a response without an error code, and `KafkaEx.Auth.SASL.OAuthBearer`
   took that response for success. The connection then failed on its first request instead of at

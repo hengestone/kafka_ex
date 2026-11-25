@@ -43,6 +43,13 @@ defmodule KafkaEx.Consumer.GenConsumerMembershipTest do
     end
   end
 
+  defmodule EpochManager do
+    use GenServer
+    def start_link(epoch), do: GenServer.start_link(__MODULE__, epoch)
+    def init(epoch), do: {:ok, epoch}
+    def handle_call(:member_epoch, _from, epoch), do: {:reply, epoch, epoch}
+  end
+
   # A MockClient whose fetch returns one record at the requested offset, so
   # every consume cycle advances and produces a :sync_commit of a new offset.
   # Everything else is MockClient (calls recorded, put_response/3).
@@ -60,6 +67,21 @@ defmodule KafkaEx.Consumer.GenConsumerMembershipTest do
       _ = GenServer.call(mock, msg)
       Process.sleep(2)
       {:reply, {:ok, %Fetch{records: [%Record{offset: offset, value: "v"}]}}, mock}
+    end
+
+    # A scripted {:requires_epoch, epoch} response: only that exact member epoch is accepted.
+    def handle_call({:offset_fetch, _group, _partitions, opts} = msg, _from, mock) do
+      case GenServer.call(mock, msg) do
+        {:requires_epoch, epoch} ->
+          if opts[:member_epoch] == epoch do
+            {:reply, {:ok, [%{partition_offsets: [%{offset: 0, error_code: :no_error}]}]}, mock}
+          else
+            {:reply, {:error, :stale_member_epoch}, mock}
+          end
+
+        reply ->
+          {:reply, reply, mock}
+      end
     end
 
     # A scripted {:block, test_pid} commit response: record the call, then
@@ -446,6 +468,75 @@ defmodule KafkaEx.Consumer.GenConsumerMembershipTest do
         end)
 
       assert log =~ "stale_member_epoch"
+    end
+
+    test "the consumer asks the group manager for the current epoch and retries at once" do
+      {:ok, manager} = EpochManager.start_link(5)
+
+      log =
+        capture_log(fn ->
+          {client, pid} =
+            start_consumer([member_id: "m", member_epoch: 3, group_manager_pid: manager], %{
+              offset_fetch: {:requires_epoch, 5}
+            })
+
+          assert List.last(wait_for_commits(client, 1))[:member_epoch] == 5
+          assert [first, second | _] = offset_fetch_opts(client)
+          assert first[:member_epoch] == 3
+          assert second[:member_epoch] == 5
+          assert Process.alive?(pid)
+        end)
+
+      assert log =~ "retrying at once with member_epoch=5"
+    end
+
+    test "the epoch from the manager is used for the following fetches and commits" do
+      {:ok, manager} = EpochManager.start_link(6)
+
+      capture_log(fn ->
+        {client, _pid} =
+          start_consumer([member_id: "m", member_epoch: 3, group_manager_pid: manager], %{
+            offset_fetch: {:requires_epoch, 6}
+          })
+
+        assert Enum.all?(wait_for_commits(client, 2), &(&1[:member_epoch] == 6))
+      end)
+    end
+
+    test "a manager that holds the same epoch leaves the consumer waiting for the push" do
+      {:ok, manager} = EpochManager.start_link(3)
+
+      capture_log(fn ->
+        {client, pid} =
+          start_consumer([member_id: "m", member_epoch: 3, group_manager_pid: manager], %{
+            offset_fetch: {:requires_epoch, 4}
+          })
+
+        wait_until(fn -> length(offset_fetch_opts(client)) >= 1 end)
+        Process.sleep(100)
+        assert length(offset_fetch_opts(client)) == 1
+
+        :ok = GenConsumer.update_membership(pid, member_epoch: 4)
+        assert List.last(wait_for_commits(client, 1))[:member_epoch] == 4
+      end)
+    end
+
+    test "a group manager that is not running leaves the consumer waiting for the push" do
+      {:ok, manager} = EpochManager.start_link(4)
+      Process.unlink(manager)
+      stop_safely(manager)
+
+      capture_log(fn ->
+        {client, pid} =
+          start_consumer([member_id: "m", member_epoch: 3, group_manager_pid: manager], %{
+            offset_fetch: {:requires_epoch, 4}
+          })
+
+        wait_until(fn -> length(offset_fetch_opts(client)) >= 1 end)
+        Process.sleep(100)
+        assert length(offset_fetch_opts(client)) == 1
+        assert Process.alive?(pid)
+      end)
     end
 
     test "other messages to a waiting consumer do not trigger an early refetch" do
